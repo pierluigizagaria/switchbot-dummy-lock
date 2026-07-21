@@ -218,6 +218,55 @@
   }
   .page-header .subtitle { color: var(--sb-cc2); font-size: 14px; margin: 0; }
 
+  /* -- Setup tabs -- */
+  .device-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    margin-bottom: var(--sp-lg);
+    border: 1px solid var(--sb-divider);
+    border-radius: var(--radius-input);
+    background: rgba(0,0,0,0.035);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .device-tabs { background: rgba(255,255,255,0.045); }
+  }
+  :root[data-theme="dark"] .device-tabs { background: rgba(255,255,255,0.045); }
+  .device-tab {
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--sb-cc2);
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 650;
+    cursor: pointer;
+    transition: background 150ms, color 150ms, box-shadow 150ms;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .device-tab.active {
+    background: var(--sb-card-bg);
+    color: var(--sb-primary-text);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  .device-tab[aria-disabled="true"] {
+    color: var(--sb-support);
+    cursor: not-allowed;
+    opacity: 0.58;
+  }
+  .tab-note {
+    margin: calc(-1 * var(--sp-sm)) 0 var(--sp-lg);
+    background: var(--sb-blue-tip-bg);
+    color: var(--sb-cc2);
+    border: 1px solid rgba(68,126,239,0.18);
+    border-radius: var(--radius-input);
+    padding: 11px 13px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
   /* ── Keypad cards ── */
   .keypads-list {
     display: flex; flex-direction: column; gap: var(--sp-sm);
@@ -428,6 +477,21 @@
     margin: 0 0 var(--sp-sm);
   }
   .result-hero .desc { color: var(--sb-cc2); font-size: 14px; margin: 0; }
+  .next-step {
+    background: var(--sb-blue-tip-bg);
+    border: 1px solid rgba(68,126,239,0.18);
+    border-radius: var(--radius-input);
+    padding: 12px 14px;
+    margin-top: var(--sp-md);
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--sb-cc2);
+  }
+  .next-step strong {
+    display: block;
+    color: var(--sb-primary-text);
+    margin-bottom: 2px;
+  }
   /* Retry button, below the error banner inside the card */
   #progress-result-error .btn { margin-top: var(--sp-lg); }
 
@@ -486,9 +550,11 @@
   <span>
     <button onclick="showScreen('login')" class="active">Login</button>
     <button onclick="showScreen('keypads')">Keypad list</button>
-    <button onclick="showScreen('progress'); previewProgress()">Pairing (Progress)</button>
-    <button onclick="showScreen('progress'); showResultSuccess()">Success</button>
-    <button onclick="showScreen('progress'); showResultError('Simulated error message.')">Error</button>
+    <button onclick="showScreen('locks'); previewLocks()">Lock list</button>
+    <button onclick="showScreen('progress'); previewProgress()">Linking (Progress)</button>
+    <button onclick="progressKind='keypad'; showScreen('progress'); showResultSuccess()">Success</button>
+    <button onclick="progressKind='lock'; showScreen('progress'); showResultSuccess()">Lock success</button>
+    <button onclick="progressKind='keypad'; showScreen('progress'); showResultError('Simulated error message.')">Error</button>
     <button onclick="toggleTheme()" id="theme-toggle" style="margin-left:8px;">🌙 Dark</button>
   </span>
 </div>
@@ -499,6 +565,14 @@
 </header>
 
 <main class="container">
+
+  <nav id="setup-tabs" class="device-tabs hidden" aria-label="Setup sections">
+    <button id="tab-keypads" class="device-tab active" type="button">Keypad</button>
+    <button id="tab-locks" class="device-tab" type="button" aria-disabled="true">Lock</button>
+  </nav>
+  <div id="lock-tab-note" class="tab-note hidden">
+    Link a keypad first. The Lock tab unlocks after the bridge has a shared key to relay.
+  </div>
 
   <!-- ─── Login ─── -->
   <section id="screen-login" class="screen">
@@ -541,7 +615,7 @@
   <section id="screen-keypads" class="screen hidden">
     <div class="page-header">
       <h2>Your keypads</h2>
-      <p class="subtitle">Select a keypad to pair with this bridge.</p>
+      <p class="subtitle">Select a keypad to link with this bridge.</p>
     </div>
 
     <div class="keypads-list" id="keypads-list">
@@ -567,7 +641,7 @@
             <span class="kp-badge online"><span class="dot"></span>−42 dBm</span>
           </div>
         </div>
-        <button class="btn-pair">Pair</button>
+        <button class="btn-pair">Link</button>
       </div>
 
       <div class="kp-card">
@@ -591,11 +665,25 @@
             <span class="kp-badge offline"><span class="dot"></span>Out of range</span>
           </div>
         </div>
-        <button class="btn-pair" disabled>Pair</button>
+        <button class="btn-pair" disabled>Link</button>
       </div>
     </div>
 
     <button id="rescan-btn" class="btn btn-secondary">↻ Rescan</button>
+  </section>
+
+  <!-- ─── Lock list ─── -->
+  <section id="screen-locks" class="screen hidden">
+    <div class="page-header">
+      <h2>Your lock</h2>
+      <p class="subtitle">Select the physical lock to relay keypad commands to.</p>
+    </div>
+
+    <div class="keypads-list" id="locks-list">
+      <div class="empty-state">Sign in to load locks.</div>
+    </div>
+
+    <button id="rescan-locks-btn" class="btn btn-secondary">↻ Rescan</button>
   </section>
 
   <!-- ─── Pairing progress ─── -->
@@ -611,9 +699,10 @@
 
     <div class="card" id="progress-card-content">
       <!-- These static steps exist only for the file:// design preview. At
-           runtime startPair() empties the stepper and fills it from the
-           `labels` array in the /api/pair response — the firmware's step list
-           is the single source of truth; nothing here is shown on-device. -->
+           runtime beginProgress() empties the stepper and fillStepper() fills
+           it from the `labels` array in the /api/pair or /api/lock/link
+           response — the firmware's step list is the single source of truth;
+           nothing here is shown on-device. -->
       <ul class="stepper" id="progress-stepper">
         <li class="step active"><span class="indicator"></span>Connecting to keypad</li>
         <li class="step"><span class="indicator"></span>Discovering services</li>
@@ -634,8 +723,12 @@
               <path d="M10 21l7 7 13-14"/>
             </svg>
           </div>
-          <h2>Paired!</h2>
-          <p class="desc">Your keypad is connected to this bridge.</p>
+          <h2 id="result-success-title">Linked!</h2>
+          <p class="desc" id="result-success-desc">Your keypad is connected to this bridge.</p>
+          <div class="next-step">
+            <strong id="result-next-title">Next: link the physical lock</strong>
+            <span id="result-next-body">Open the Lock tab above to connect the real lock and relay keypad commands.</span>
+          </div>
         </div>
       </div>
 
@@ -649,8 +742,8 @@
               <line x1="28" y1="12" x2="12" y2="28"/>
             </svg>
           </div>
-          <h2>Pairing failed</h2>
-          <p class="desc">Could not complete the BLE handshake.</p>
+          <h2 id="result-error-title">Linking failed</h2>
+          <p class="desc" id="result-error-desc">Could not complete the BLE handshake.</p>
         </div>
 
         <div class="banner banner-error">
@@ -658,11 +751,11 @@
           <span id="error-banner-text">Timed out waiting for the ACK on the finalize command. Move the keypad closer and try again.</span>
         </div>
 
-        <button class="btn btn-primary" onclick="showScreen('keypads')">Try again</button>
+        <button class="btn btn-primary" onclick="retryFromError()">Try again</button>
       </div>
     </div>
 
-    <p class="footnote" id="progress-hint">Pairing takes about 10 seconds.</p>
+    <p class="footnote" id="progress-hint">Linking takes about 10 seconds.</p>
   </section>
 
 </main>
@@ -685,12 +778,91 @@
       next === 'dark' ? '☀️ Light' : '🌙 Dark';
   }
 
+  let currentScreen = 'login';
+  let keypadPaired = false;
+  let lockLinked = false;
+  /* Which job the progress screen is showing ('keypad' | 'lock') — selects
+     the result copy and which tab lights up while the job runs. */
+  let progressKind = 'keypad';
+  /* True while a pair/link job is in flight. Locks tab navigation: kicking
+     off a BLE rescan mid-handshake would disturb the running job's radio
+     work, and there is nothing useful to do elsewhere until it finishes. */
+  let jobActive = false;
+
+  function setKeypadPaired(value) {
+    keypadPaired = !!value;
+    updateSetupTabs(currentScreen);
+  }
+
+  function setLockLinked(value) {
+    lockLinked = !!value;
+    updateSetupTabs(currentScreen);
+  }
+
+  function updateSetupTabs(name) {
+    const tabs = document.getElementById('setup-tabs');
+    const note = document.getElementById('lock-tab-note');
+    const showTabs = name === 'keypads' || name === 'locks' || name === 'progress';
+    tabs.classList.toggle('hidden', !showTabs);
+
+    const keypadTab = document.getElementById('tab-keypads');
+    const lockTab = document.getElementById('tab-locks');
+    const lockActive = name === 'locks' ||
+      (name === 'progress' && progressKind === 'lock');
+    keypadTab.classList.toggle('active', !lockActive);
+    lockTab.classList.toggle('active', lockActive);
+    lockTab.setAttribute('aria-disabled', keypadPaired ? 'false' : 'true');
+
+    const showNote = showTabs && !keypadPaired && name !== 'progress';
+    note.classList.toggle('hidden', !showNote);
+  }
+
+  function showLockGate() {
+    const list = document.getElementById('locks-list');
+    if (list) {
+      list.innerHTML = '<div class="empty-state">Link a keypad first. The lock relay needs the keypad shared key.</div>';
+    }
+    const rescan = document.getElementById('rescan-locks-btn');
+    if (rescan) rescan.disabled = true;
+  }
+
+  /* "Already done" states: pairing and linking are one-shot — redoing either
+     goes through the bridge's Reset button, which also rotates the shared
+     key. The server enforces the same rule with a 409, this is just the
+     friendly face of it. */
+  const RESET_HINT = 'Press the bridge’s Reset button (in Home Assistant) to start over.';
+
+  function showKeypadDone() {
+    document.getElementById('keypads-list').innerHTML =
+      '<div class="empty-state">A keypad is already linked to this bridge.<br>' +
+      RESET_HINT + '</div>';
+    document.getElementById('rescan-btn').disabled = true;
+  }
+
+  function showLockDone() {
+    document.getElementById('locks-list').innerHTML =
+      '<div class="empty-state">A lock is already linked to this bridge.<br>' +
+      RESET_HINT + '</div>';
+    document.getElementById('rescan-locks-btn').disabled = true;
+  }
+
+  function unlockLockControls() {
+    const rescan = document.getElementById('rescan-locks-btn');
+    if (rescan) rescan.disabled = false;
+  }
+
   /* Preview-only screen switcher. The real firmware will use the
      submit handlers / API calls below. */
   function showScreen(name) {
+    currentScreen = name;
     document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
     const el = document.getElementById('screen-' + name);
     if (el) el.classList.remove('hidden');
+    updateSetupTabs(name);
+    if (name === 'locks') {
+      if (!keypadPaired) showLockGate();
+      else if (lockLinked) showLockDone();
+    }
     document.querySelectorAll('.preview-nav button').forEach(b => b.classList.remove('active'));
     const btn = [...document.querySelectorAll('.preview-nav button')]
       .find(b => b.textContent.trim().toLowerCase().includes(name.replace('result-', '').replace(/-/g, ' ')));
@@ -701,10 +873,11 @@
      look. Without this the Progress button would still show whichever result
      (Success / Error) was opened last, since those swap the stepper out. */
   function previewProgress() {
+    progressKind = 'keypad';
     document.getElementById('progress-result-success').classList.add('hidden');
     document.getElementById('progress-result-error').classList.add('hidden');
     document.getElementById('progress-stepper').classList.remove('hidden');
-    setProgressHint('Pairing takes about 10 seconds.');
+    setProgressHint('Linking takes about 10 seconds.');
     const steps = document.querySelectorAll('#progress-stepper .step');
     steps.forEach((li, i) => {
       li.classList.remove('done', 'active');
@@ -714,6 +887,21 @@
     const bar = document.getElementById('progress-bar');
     bar.style.background = 'var(--sb-theme)';
     bar.style.width = Math.round((3 / steps.length) * 100) + '%';
+  }
+
+  function previewLocks() {
+    setKeypadPaired(true);
+    unlockLockControls();
+    const list = document.getElementById('locks-list');
+    if (!list || location.protocol !== 'file:') return;
+    list.innerHTML = '';
+    list.appendChild(renderLockCard({
+      name: 'Front Door Lock',
+      mac: 'B0:E9:FE:11:22:33',
+      model: 'lock_pro',
+      online: true,
+      rssi: -45,
+    }));
   }
 
   /* ── REST helpers ───────────────────────────────────────────────────── */
@@ -750,6 +938,23 @@
 
   /* ── Login ───────────────────────────────────────────────────────────── */
 
+  document.getElementById('tab-keypads').addEventListener('click', () => {
+    if (jobActive) return;
+    showScreen('keypads');
+    loadKeypads();
+  });
+
+  document.getElementById('tab-locks').addEventListener('click', () => {
+    if (jobActive) return;
+    if (!keypadPaired) {
+      showScreen('keypads');
+      return;
+    }
+    unlockLockControls();
+    showScreen('locks');
+    loadLocks();
+  });
+
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -759,12 +964,21 @@
     btn.textContent = 'Signing in…';
     setBanner('login-error', null);
     try {
-      await api('POST', '/api/login', {
+      const login = await api('POST', '/api/login', {
         email: fd.get('email'),
         password: fd.get('password'),
       });
-      showScreen('keypads');
-      loadKeypads();
+      setKeypadPaired(!!login.keypad_paired);
+      setLockLinked(!!login.lock_linked);
+      // Land on the first incomplete step; with everything done the Keypad
+      // tab shows its completed state.
+      if (keypadPaired && !lockLinked) {
+        showScreen('locks');
+        loadLocks();
+      } else {
+        showScreen('keypads');
+        loadKeypads();
+      }
     } catch (err) {
       const text = document.getElementById('login-error-text');
       if (text) text.textContent = err.message;
@@ -777,27 +991,99 @@
 
   /* ── Keypad list ─────────────────────────────────────────────────────── */
 
-  async function loadKeypads() {
-    // /api/keypads runs a ~8s BLE scan; lock the Rescan button so the user
-    // can't fire concurrent scans by clicking again while one is running.
-    const btn = document.getElementById('rescan-btn');
+  function deviceIcon(kind) {
+    if (kind === 'lock') {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+        'stroke-linecap="round" stroke-linejoin="round">' +
+        '<rect x="5" y="10" width="14" height="10" rx="2"/>' +
+        '<path d="M8 10V7a4 4 0 0 1 8 0v3"/>' +
+        '<path d="M12 14v2"/>' +
+      '</svg>';
+    }
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="4" y="3" width="16" height="18" rx="2.5"/>' +
+      '<circle cx="8"  cy="9"  r="1" fill="currentColor" stroke="none"/>' +
+      '<circle cx="12" cy="9"  r="1" fill="currentColor" stroke="none"/>' +
+      '<circle cx="16" cy="9"  r="1" fill="currentColor" stroke="none"/>' +
+      '<circle cx="8"  cy="13" r="1" fill="currentColor" stroke="none"/>' +
+      '<circle cx="12" cy="13" r="1" fill="currentColor" stroke="none"/>' +
+      '<circle cx="16" cy="13" r="1" fill="currentColor" stroke="none"/>' +
+      '<rect x="7" y="16.5" width="10" height="1.5" rx="0.75" fill="currentColor" stroke="none"/>' +
+    '</svg>';
+  }
+
+  const DEVICE_FLOWS = {
+    keypad: {
+      listId: 'keypads-list',
+      rescanId: 'rescan-btn',
+      listPath: '/api/keypads',
+      startPath: '/api/pair',
+      statusPath: '/api/pair/status',
+      action: 'Link',
+      loading: 'Searching for keypads nearby...',
+      empty: 'No keypads found in your SwitchBot account.',
+      hint: 'Linking takes about 10 seconds.',
+      beforeLoad() {
+        if (keypadPaired) {
+          showKeypadDone();
+          return false;
+        }
+        return true;
+      },
+      payload(device) {
+        return { mac: device.mac, family: device.family };
+      },
+    },
+    lock: {
+      listId: 'locks-list',
+      rescanId: 'rescan-locks-btn',
+      listPath: '/api/locks',
+      startPath: '/api/lock/link',
+      statusPath: '/api/lock/link/status',
+      action: 'Link',
+      loading: 'Searching for locks nearby...',
+      empty: 'No supported locks found in your SwitchBot account.',
+      hint: 'Linking takes about 10 seconds.',
+      beforeLoad() {
+        if (!keypadPaired) {
+          showLockGate();
+          return false;
+        }
+        if (lockLinked) {
+          showLockDone();
+          return false;
+        }
+        unlockLockControls();
+        return true;
+      },
+      payload(device) {
+        return { mac: device.mac };
+      },
+    },
+  };
+
+  async function loadDeviceList(kind) {
+    const flow = DEVICE_FLOWS[kind];
+    if (flow.beforeLoad && !flow.beforeLoad()) return;
+    const btn = document.getElementById(flow.rescanId);
     if (btn.disabled) return;
     btn.disabled = true;
-    const list = document.getElementById('keypads-list');
+    const list = document.getElementById(flow.listId);
     list.innerHTML =
       '<div class="empty-state">' +
         '<div class="spinner"></div>' +
-        'Searching for keypads nearby…' +
+        flow.loading +
       '</div>';
     try {
-      const keypads = await api('GET', '/api/keypads');
-      if (!Array.isArray(keypads) || keypads.length === 0) {
-        list.innerHTML = '<div class="empty-state">No keypads found in your SwitchBot account.</div>';
+      const devices = await api('GET', flow.listPath);
+      if (!Array.isArray(devices) || devices.length === 0) {
+        list.innerHTML = '<div class="empty-state">' + flow.empty + '</div>';
         return;
       }
       list.innerHTML = '';
-      for (const kp of keypads) {
-        list.appendChild(renderKeypadCard(kp));
+      for (const device of devices) {
+        list.appendChild(renderDeviceCard(kind, device));
       }
     } catch (err) {
       list.innerHTML = '<div class="empty-state">Error: ' + escapeHtml(err.message) + '</div>';
@@ -806,95 +1092,116 @@
     }
   }
 
-  function renderKeypadCard(kp) {
+  function renderDeviceCard(kind, device) {
+    const flow = DEVICE_FLOWS[kind];
     const card = document.createElement('div');
-    const offline = !kp.online;
+    const offline = !device.online;
     card.className = 'kp-card' + (offline ? '' : ' online');
-    const rssiLabel = kp.rssi != null ? '−' + Math.abs(kp.rssi) + ' dBm' : 'Nearby';
+    const rssiLabel = device.rssi != null ? '-' + Math.abs(device.rssi) + ' dBm' : 'Nearby';
     const badgeClass = offline ? 'offline' : 'online';
     const badgeText = offline ? 'Out of range' : rssiLabel;
-    const kpSvg =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
-        'stroke-linecap="round" stroke-linejoin="round">' +
-        '<rect x="4" y="3" width="16" height="18" rx="2.5"/>' +
-        '<circle cx="8"  cy="9"  r="1" fill="currentColor" stroke="none"/>' +
-        '<circle cx="12" cy="9"  r="1" fill="currentColor" stroke="none"/>' +
-        '<circle cx="16" cy="9"  r="1" fill="currentColor" stroke="none"/>' +
-        '<circle cx="8"  cy="13" r="1" fill="currentColor" stroke="none"/>' +
-        '<circle cx="12" cy="13" r="1" fill="currentColor" stroke="none"/>' +
-        '<circle cx="16" cy="13" r="1" fill="currentColor" stroke="none"/>' +
-        '<rect x="7" y="16.5" width="10" height="1.5" rx="0.75" fill="currentColor" stroke="none"/>' +
-      '</svg>';
     card.innerHTML =
-      '<div class="kp-icon' + (offline ? ' dim' : '') + '">' + kpSvg + '</div>' +
+      '<div class="kp-icon' + (offline ? ' dim' : '') + '">' + deviceIcon(kind) + '</div>' +
       '<div class="kp-info">' +
-        '<div class="kp-name">' + escapeHtml(kp.name) + '</div>' +
+        '<div class="kp-name">' + escapeHtml(device.name) + '</div>' +
         '<div class="kp-meta">' +
-          '<span class="kp-mac">' + escapeHtml(kp.mac) + '</span>' +
+          '<span class="kp-mac">' + escapeHtml(device.mac) + '</span>' +
           '<span class="kp-badge ' + badgeClass + '"><span class="dot"></span>' + escapeHtml(badgeText) + '</span>' +
         '</div>' +
       '</div>' +
-      '<button class="btn-pair"' + (offline ? ' disabled' : '') + '>Pair</button>';
+      '<button class="btn-pair"' + (offline ? ' disabled' : '') + '>' + flow.action + '</button>';
     card.querySelector('.btn-pair').addEventListener('click', () => {
-      if (offline) return;
-      startPair(kp);
+      if (!offline) startDeviceJob(kind, device);
     });
     return card;
   }
 
-  document.getElementById('rescan-btn').addEventListener('click', loadKeypads);
-
-  /* ── Pairing job ─────────────────────────────────────────────────────── */
-
-  let currentKp = null;
-
-  async function startPair(kp) {
-    currentKp = kp;
-    /* The real step list (labels) comes from the firmware in the /api/pair
-       response — never duplicated here. Until it arrives, show a loader so the
-       card is never empty; it's swapped for the real steps on response. */
-    const stepper = document.getElementById('progress-stepper');
-    stepper.classList.add('loading');
-    stepper.innerHTML = '<li class="stepper-loader"><span class="spinner"></span></li>';
-    showScreen('progress');
-    document.getElementById('progress-kp-name').textContent = kp.name;
-    document.getElementById('progress-kp-mac').textContent = kp.mac;
-    document.getElementById('progress-bar').style.width = '0%';
-    document.getElementById('progress-bar').style.background = 'var(--sb-theme)';
-    
-    // Reset view to Stepper mode inside the card
-    document.getElementById('progress-stepper').classList.remove('hidden');
-    document.getElementById('progress-result-success').classList.add('hidden');
-    document.getElementById('progress-result-error').classList.add('hidden');
-    setProgressHint('Pairing takes about 10 seconds.');
-
+  async function startDeviceJob(kind, device) {
+    const flow = DEVICE_FLOWS[kind];
+    beginProgress(kind, device.name, device.mac, flow.hint);
     let jobId;
     try {
-      const r = await api('POST', '/api/pair', { mac: kp.mac, family: kp.family });
+      const r = await api('POST', flow.startPath, flow.payload(device));
       jobId = r.job_id;
-      /* Fill the stepper from the firmware's own step list — the single source
-         of truth for the steps, their count, order and wording. The per-item
-         animation-delay staggers the fade-in so the list eases in. */
-      if (Array.isArray(r.labels) && r.labels.length) {
-        stepper.classList.remove('loading');
-        stepper.innerHTML = r.labels.map((l, i) =>
-          '<li class="step" style="animation-delay:' + (i * 55) + 'ms">' +
-          '<span class="indicator"></span>' + escapeHtml(l) + '</li>'
-        ).join('');
-      }
+      fillStepper(r.labels);
     } catch (err) {
       showResultError(err.message);
       return;
     }
-    pollPair(jobId);
+    pollJob(flow.statusPath, jobId);
   }
 
-  async function pollPair(jobId) {
+  async function loadKeypads() {
+    return loadDeviceList('keypad');
+  }
+
+  function renderKeypadCard(kp) {
+    return renderDeviceCard('keypad', kp);
+  }
+
+  document.getElementById('rescan-btn').addEventListener('click', loadKeypads);
+
+  async function loadLocks() {
+    return loadDeviceList('lock');
+  }
+
+  function renderLockCard(lock) {
+    return renderDeviceCard('lock', lock);
+  }
+
+  document.getElementById('rescan-locks-btn').addEventListener('click', loadLocks);
+
+  /* ── Background jobs (keypad linking & lock linking) ─────────────────── */
+
+  /* Reset the shared progress screen for a new job: header, bar, and a
+     loading stepper until the firmware returns its step labels. */
+  function beginProgress(kind, name, mac, hint) {
+    progressKind = kind;
+    jobActive = true;
+    const stepper = document.getElementById('progress-stepper');
+    stepper.classList.add('loading');
+    stepper.innerHTML = '<li class="stepper-loader"><span class="spinner"></span></li>';
+    showScreen('progress');
+    document.getElementById('progress-kp-name').textContent = name;
+    document.getElementById('progress-kp-mac').textContent = mac;
+    const bar = document.getElementById('progress-bar');
+    bar.style.width = '0%';
+    bar.style.background = 'var(--sb-theme)';
+
+    // Reset view to Stepper mode inside the card
+    stepper.classList.remove('hidden');
+    document.getElementById('progress-result-success').classList.add('hidden');
+    document.getElementById('progress-result-error').classList.add('hidden');
+    setProgressHint(hint);
+  }
+
+  /* Fill the stepper from the firmware's own step list — the single source
+     of truth for the steps, their count, order and wording. The per-item
+     animation-delay staggers the fade-in so the list eases in. */
+  function fillStepper(labels) {
+    if (!Array.isArray(labels) || !labels.length) return;
+    const stepper = document.getElementById('progress-stepper');
+    stepper.classList.remove('loading');
+    stepper.innerHTML = labels.map((l, i) =>
+      '<li class="step" style="animation-delay:' + (i * 55) + 'ms">' +
+      '<span class="indicator"></span>' + escapeHtml(l) + '</li>'
+    ).join('');
+  }
+
+  async function startPair(kp) {
+    return startDeviceJob('keypad', kp);
+  }
+
+  async function startLinkLock(lock) {
+    return startDeviceJob('lock', lock);
+  }
+
+  async function pollJob(statusPath, jobId) {
     while (true) {
       await new Promise(r => setTimeout(r, 500));
       let status;
       try {
-        status = await api('GET', '/api/pair/status?job_id=' + encodeURIComponent(jobId));
+        status = await api('GET', statusPath + '?job_id=' + encodeURIComponent(jobId));
       } catch (err) {
         showResultError(err.message);
         return;
@@ -916,9 +1223,9 @@
     }
   }
 
-  /* The footnote under the progress card: a state hint while pairing runs,
-     the "you can close this" note on success, hidden on error (the in-card
-     error banner carries that detail instead). Pass null to hide it. */
+  /* The footnote under the progress card: a state hint while a job runs,
+     the next-step hint on success, hidden on error (the in-card error
+     banner carries that detail instead). Pass null to hide it. */
   function setProgressHint(text) {
     const el = document.getElementById('progress-hint');
     if (text === null) {
@@ -929,16 +1236,53 @@
     el.classList.remove('hidden');
   }
 
+  /* Per-job copy for the shared result screens — keypad linking and lock
+     linking render into the same success/error heroes. */
+  const RESULT_COPY = {
+    keypad: {
+      successTitle: 'Linked!',
+      successDesc: 'Your keypad is connected to this bridge.',
+      nextTitle: 'Next: link the physical lock',
+      nextBody: 'Open the Lock tab above to connect the real lock and relay keypad commands.',
+      successHint: 'Open the Lock tab above to link the physical lock.',
+      errorTitle: 'Linking failed',
+      errorDesc: 'Could not complete the BLE handshake.',
+      retry: () => { showScreen('keypads'); loadKeypads(); },
+    },
+    lock: {
+      successTitle: 'Linked!',
+      successDesc: 'Your lock now takes its keypad commands through this bridge.',
+      nextTitle: 'Setup complete',
+      nextBody: 'You can close this page — the setup server shuts down automatically after a few minutes of inactivity.',
+      successHint: null,
+      errorTitle: 'Linking failed',
+      errorDesc: 'Could not verify the lock over BLE.',
+      retry: () => { showScreen('locks'); loadLocks(); },
+    },
+  };
+
   function showResultSuccess() {
+    jobActive = false;
+    const copy = RESULT_COPY[progressKind];
+    if (progressKind === 'lock') setLockLinked(true);
+    else setKeypadPaired(true);
+    document.getElementById('result-success-title').textContent = copy.successTitle;
+    document.getElementById('result-success-desc').textContent = copy.successDesc;
+    document.getElementById('result-next-title').textContent = copy.nextTitle;
+    document.getElementById('result-next-body').textContent = copy.nextBody;
     document.getElementById('progress-stepper').classList.add('hidden');
-    setProgressHint('You can close this page — the pairing server shuts down automatically.');
+    setProgressHint(copy.successHint);
     document.getElementById('progress-result-error').classList.add('hidden');
     document.getElementById('progress-result-success').classList.remove('hidden');
     document.getElementById('progress-bar').style.width = '100%';
     document.getElementById('progress-bar').style.background = 'var(--sb-success)';
   }
-  
+
   function showResultError(msg) {
+    jobActive = false;
+    const copy = RESULT_COPY[progressKind];
+    document.getElementById('result-error-title').textContent = copy.errorTitle;
+    document.getElementById('result-error-desc').textContent = copy.errorDesc;
     document.getElementById('progress-stepper').classList.add('hidden');
     setProgressHint(null);
     document.getElementById('progress-result-success').classList.add('hidden');
@@ -948,6 +1292,10 @@
 
     const banner = document.getElementById('error-banner-text');
     if (banner) banner.textContent = msg;
+  }
+
+  function retryFromError() {
+    RESULT_COPY[progressKind].retry();
   }
 </script>
 </body>

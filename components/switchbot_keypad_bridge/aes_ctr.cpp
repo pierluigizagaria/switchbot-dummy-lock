@@ -1,5 +1,8 @@
 #include "aes_ctr.h"
 
+#include <aes/esp_aes_gcm.h>
+#include <mbedtls/gcm.h>
+
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -53,6 +56,45 @@ bool aes_ctr_xcrypt_raw_key(const uint8_t key[16], const uint8_t iv[16],
   const bool ok = aes_ctr_xcrypt(key_id, iv, input, output, length);
   psa_destroy_key(key_id);
   return ok;
+}
+
+bool aes_gcm_encrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
+                             const uint8_t *input, uint8_t *output,
+                             size_t length, uint8_t tag[16]) {
+  esp_gcm_context ctx;
+  esp_aes_gcm_init(&ctx);
+  int rc = esp_aes_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+  if (rc == 0) {
+    rc = esp_aes_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, length,
+                                   iv, 12, nullptr, 0,
+                                   input, output, 16, tag);
+  }
+  esp_aes_gcm_free(&ctx);
+  if (rc != 0) {
+    ESP_LOGE(TAG, "AES-GCM encrypt failed (%d)", rc);
+    return false;
+  }
+  return true;
+}
+
+bool aes_gcm_decrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
+                             const uint8_t *input, uint8_t *output,
+                             size_t length) {
+  uint8_t ignored_tag[16];
+  esp_gcm_context ctx;
+  esp_aes_gcm_init(&ctx);
+  int rc = esp_aes_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+  if (rc == 0) {
+    rc = esp_aes_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_DECRYPT, length,
+                                   iv, 12, nullptr, 0,
+                                   input, output, sizeof(ignored_tag), ignored_tag);
+  }
+  esp_aes_gcm_free(&ctx);
+  if (rc != 0) {
+    ESP_LOGE(TAG, "AES-GCM decrypt failed (%d)", rc);
+    return false;
+  }
+  return true;
 }
 
 }  // namespace switchbot_keypad_bridge

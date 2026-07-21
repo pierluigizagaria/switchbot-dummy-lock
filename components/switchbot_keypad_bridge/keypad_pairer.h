@@ -23,33 +23,22 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <vector>
 
+#include "background_job.h"
 #include "keypad_advert.h"
 
 namespace esphome {
 namespace switchbot_keypad_bridge {
 
-class KeypadPairer {
+class KeypadPairer : private BackgroundBleJob {
  public:
-  enum class State : uint8_t {
-    IDLE,
-    RUNNING,
-    SUCCESS,
-    FAILED,
-  };
+  using State = BackgroundBleJob::State;
 
   // Snapshot of the pairer's progress, safe to copy across threads.
-  struct Status {
-    State       state{State::IDLE};
-    uint8_t     step{0};       // 0-based index of the step currently in flight
-    uint8_t     total{0};      // total number of steps; 0 before start
-    std::string message;       // human-readable status of the current step
-    std::string error;         // populated when state == FAILED
-    std::string job_id;        // matches the value returned by start()
-    // Identity of the keypad just paired, valid only when state == SUCCESS.
+  struct Status : BackgroundBleJob::Status {
+    // Identity of the keypad just linked, valid only when state == SUCCESS.
     // The family comes from the live advertisement read during discovery.
     std::string keypad_mac;    // pretty form, e.g. "B0:E9:FE:..."
     KeypadFamily family{KeypadFamily::ORIGINAL};
@@ -83,12 +72,16 @@ class KeypadPairer {
   // Atomic snapshot of progress. Suitable for polling from any thread.
   Status status() const;
 
+  // Cheap state-only read (no string copies) — for per-loop polling.
+  State state() const { return BackgroundBleJob::state(); }
+
  private:
+  friend class BackgroundBleJob;
+
   void execute_(Request &req);
 
   // Step helpers (push step number + message, log, return immediately).
   void set_step_(uint8_t step, const char *msg);
-  void set_running_(uint8_t total, const std::string &job_id);
   void set_success_(const std::string &keypad_mac, KeypadFamily family);
   void set_failed_(const std::string &err);
 
@@ -102,9 +95,9 @@ class KeypadPairer {
   bool send_command_(NimBLERemoteCharacteristic *rx,
                      const uint8_t *plaintext, size_t plaintext_len);
 
-  // ----- Shared state (read by status(), written by the task) -----
-  mutable std::mutex   mu_;
-  Status               status_{};
+  // ----- Success payload (read by status(), written by the task) -----
+  std::string          status_keypad_mac_;
+  KeypadFamily         status_family_{KeypadFamily::ORIGINAL};
 
   // ----- Task / sync primitives -----
   TaskHandle_t         task_handle_{nullptr};

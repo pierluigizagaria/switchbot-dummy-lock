@@ -1,6 +1,6 @@
 """ESPHome integration: SwitchBot Keypad Bridge.
 
-This external component emulates a SwitchBot Lock BLE peripheral so a paired
+This external component emulates a SwitchBot Lock BLE peripheral so a linked
 SwitchBot Keypad can deliver encrypted unlock/lock commands. The bridge
 decrypts the frames in-place using mbed-TLS / PSA Crypto and exposes the
 decoded commands through two surfaces:
@@ -31,7 +31,6 @@ from esphome.components.esp32 import (
     include_builtin_idf_component,
 )
 from esphome.const import (
-    CONF_BATTERY_LEVEL,
     CONF_ID,
     CONF_TRIGGER_ID,
     DEVICE_CLASS_BATTERY,
@@ -51,8 +50,11 @@ MULTI_CONF = False
 
 CONF_KEYPAD_ACTION = "keypad_action"
 CONF_KEYPAD = "keypad"
+CONF_LINKED_LOCK = "linked_lock"
+CONF_KEYPAD_BATTERY_LEVEL = "keypad_battery_level"
+CONF_LOCK_BATTERY_LEVEL = "lock_battery_level"
 CONF_BATTERY_SCAN_INTERVAL = "battery_scan_interval"
-CONF_UNPAIR_BUTTON = "unpair_button"
+CONF_RESET_BUTTON = "reset_button"
 CONF_ON_LOCK = "on_lock"
 CONF_ON_UNLOCK = "on_unlock"
 CONF_ON_DOORBELL = "on_doorbell"
@@ -61,7 +63,7 @@ CONF_PAIRING_UI = "pairing_ui"
 # Auto-generated id for the progmem array that carries the embedded UI.
 CONF_PAIRING_UI_HTML_ID = "pairing_ui_html_id"
 
-# The pairing wizard is a single, self-contained HTML file living next to
+# The setup wizard is a single, self-contained HTML file living next to
 # this module. It doubles as a browser-openable design preview.
 PAIRING_UI_HTML = Path(__file__).parent / "pairing_ui.html"
 
@@ -70,7 +72,7 @@ switchbot_keypad_bridge_ns = cg.esphome_ns.namespace("switchbot_keypad_bridge")
 SwitchbotKeypadBridge = switchbot_keypad_bridge_ns.class_(
     "SwitchbotKeypadBridge", cg.Component
 )
-UnpairButton = switchbot_keypad_bridge_ns.class_("UnpairButton", button.Button)
+ResetButton = switchbot_keypad_bridge_ns.class_("ResetButton", button.Button)
 LockTrigger = switchbot_keypad_bridge_ns.class_(
     "LockTrigger", automation.Trigger.template()
 )
@@ -89,7 +91,7 @@ def _deprecated_pairing_ui(value):
     v = cv.boolean(value)
     if v is False:
         raise cv.Invalid(
-            "pairing_ui: false is no longer supported — the on-device pairing "
+            "pairing_ui: false is no longer supported — the on-device setup "
             "wizard is always compiled in. Remove this option."
         )
     LOGGER.warning(
@@ -104,12 +106,23 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(SwitchbotKeypadBridge),
         cv.Optional(CONF_KEYPAD_ACTION): event.event_schema(icon="mdi:gesture-tap"),
         cv.Optional(CONF_KEYPAD): text_sensor.text_sensor_schema(
-            icon="mdi:dialpad",
+            icon="mdi:lock-smart",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_LINKED_LOCK): text_sensor.text_sensor_schema(
+            icon="mdi:key",
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         # The keypad broadcasts its battery in its BLE advertisement; the
         # bridge picks it up with a short background scan once per interval.
-        cv.Optional(CONF_BATTERY_LEVEL): sensor.sensor_schema(
+        cv.Optional(CONF_KEYPAD_BATTERY_LEVEL): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            device_class=DEVICE_CLASS_BATTERY,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            accuracy_decimals=0,
+        ),
+        cv.Optional(CONF_LOCK_BATTERY_LEVEL): sensor.sensor_schema(
             unit_of_measurement=UNIT_PERCENT,
             device_class=DEVICE_CLASS_BATTERY,
             state_class=STATE_CLASS_MEASUREMENT,
@@ -120,10 +133,10 @@ CONFIG_SCHEMA = cv.Schema(
             CONF_BATTERY_SCAN_INTERVAL, default="15min"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_PAIRING_UI): _deprecated_pairing_ui,
-        cv.Optional(CONF_UNPAIR_BUTTON): button.button_schema(
-            UnpairButton,
+        cv.Optional(CONF_RESET_BUTTON): button.button_schema(
+            ResetButton,
             entity_category=ENTITY_CATEGORY_CONFIG,
-            icon="mdi:link-off",
+            icon="mdi:restart",
         ),
         cv.GenerateID(CONF_PAIRING_UI_HTML_ID): cv.declare_id(cg.uint8),
         cv.Optional(CONF_ON_LOCK): automation.validate_automation(
@@ -167,7 +180,7 @@ def _final_validate(config):
                 "NimBLE benefits from the extra heap."
             )
 
-    # The pairing wizard binds to port 80 and reuses ESPHome's USE_WEBSERVER
+    # The setup wizard binds to port 80 and reuses ESPHome's USE_WEBSERVER
     # flag for HA discovery. Both clash with the official `web_server:`
     # component, which also defines USE_WEBSERVER and (by default) listens
     # on 80.
@@ -198,28 +211,38 @@ async def to_code(config):
         sens = await text_sensor.new_text_sensor(keypad_sensor_conf)
         cg.add(var.set_keypad_text_sensor(sens))
 
-    if battery_conf := config.get(CONF_BATTERY_LEVEL):
+    if linked_lock_conf := config.get(CONF_LINKED_LOCK):
+        sens = await text_sensor.new_text_sensor(linked_lock_conf)
+        cg.add(var.set_linked_lock_text_sensor(sens))
+
+    if battery_conf := config.get(CONF_KEYPAD_BATTERY_LEVEL):
         batt = await sensor.new_sensor(battery_conf)
-        cg.add(var.set_battery_level_sensor(batt))
+        cg.add(var.set_keypad_battery_level_sensor(batt))
+
+    if lock_battery_conf := config.get(CONF_LOCK_BATTERY_LEVEL):
+        batt = await sensor.new_sensor(lock_battery_conf)
+        cg.add(var.set_lock_battery_level_sensor(batt))
+
+    if config.get(CONF_KEYPAD_BATTERY_LEVEL) or config.get(CONF_LOCK_BATTERY_LEVEL):
         cg.add(
             var.set_battery_scan_interval(
                 config[CONF_BATTERY_SCAN_INTERVAL].total_milliseconds
             )
         )
 
-    if button_conf := config.get(CONF_UNPAIR_BUTTON):
+    if button_conf := config.get(CONF_RESET_BUTTON):
         btn = await button.new_button(button_conf)
         await cg.register_parented(btn, config[CONF_ID])
 
     # Make Home Assistant show the "Visit Device" link on the device page.
     # ESPHome's api component fills `webserver_port` in DeviceInfoResponse
     # iff USE_WEBSERVER is defined; HA uses that field to construct the URL.
-    # We piggy-back on the same flag so the pairing wizard gets discovered
+    # We piggy-back on the same flag so the setup wizard gets discovered
     # without requiring the user to also enable `web_server:` in YAML.
     cg.add_define("USE_WEBSERVER")
     cg.add_define("USE_WEBSERVER_PORT", 80)
 
-    # Bake the pairing wizard's HTML into the firmware image as a
+    # Bake the setup wizard's HTML into the firmware image as a
     # gzip-compressed PROGMEM array (~4x smaller; served with
     # Content-Encoding: gzip). `pairing_ui.html` is the single source of
     # truth — no generated header to commit, no build step to run by hand.
@@ -255,6 +278,13 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_BT_ENABLED", True)
     add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", False)
     add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_ENABLED", True)
+    add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_MAX_CONNECTIONS", 3)
+
+    # LWIP's default pool of 10 sockets is too tight for this device: the HA
+    # API, a log-stream client, mDNS, the wizard's httpd sessions and the
+    # cloud TLS client can all hold sockets at once — the TLS connect then
+    # fails with "failed to create socket" / "sock < 0".
+    add_idf_sdkconfig_option("CONFIG_LWIP_MAX_SOCKETS", 16)
 
     # Silence the NimBLE logger to keep heap and serial noise to a minimum.
     add_idf_sdkconfig_option("CONFIG_NIMBLE_CPP_LOG_LEVEL", 0)

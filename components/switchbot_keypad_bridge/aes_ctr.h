@@ -24,5 +24,19 @@ bool aes_ctr_xcrypt(psa_key_id_t key, const uint8_t iv[16],
 bool aes_ctr_xcrypt_raw_key(const uint8_t key[16], const uint8_t iv[16],
                             const uint8_t *input, uint8_t *output, size_t length);
 
+// AES-128-GCM helpers for newer SwitchBot locks. SwitchBot only carries the
+// first two bytes of the authentication tag in the command header, but the full
+// tag is still computed here so the caller can copy that prefix.
+bool aes_gcm_encrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
+                             const uint8_t *input, uint8_t *output,
+                             size_t length, uint8_t tag[16]);
+
+// Decrypt without authenticating a received short-tag SwitchBot packet. This
+// mirrors the official clients: firmware handles acceptance and only exposes a
+// partial tag to BLE clients, so there is no complete tag to verify locally.
+bool aes_gcm_decrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
+                             const uint8_t *input, uint8_t *output,
+                             size_t length);
+
 }  // namespace switchbot_keypad_bridge
 }  // namespace esphome

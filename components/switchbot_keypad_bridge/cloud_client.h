@@ -14,10 +14,10 @@
 //   - the user's home region ("us" / "eu" / ...)
 //   - the account device list (keypad detection happens later, over BLE)
 //   - the keypad's current `communicationKey` (the cloud-issued key the
-//     keypad uses to talk to its currently paired lock)
+//     keypad uses to talk to its currently linked lock)
 //
 // The last one is what we re-encrypt the BLE pairing commands with —
-// the cloud client is the entry point of the on-device pairing wizard.
+// the cloud client is the entry point of the on-device setup wizard.
 
 #include <cstdint>
 #include <string>
@@ -30,13 +30,14 @@ class CloudClient {
  public:
   // Plain-data view of one account device as returned by
   // /wonder/device/v3/getdevice. Whether a device is a keypad — and which
-  // family it speaks — is decided by the pairing UI / pairer from its live
+  // family it speaks — is decided by the setup UI / pairer from its live
   // BLE advertisement (keypad_advert.h); the cloud only supplies identity
   // (MAC, name) and, later, the communication key.
   struct AccountDevice {
     std::string mac;          // hex, no separators: "B0E9FE612E75"
     std::string mac_pretty;   // "B0:E9:FE:61:2E:75"
     std::string name;         // user-set, e.g. "Keypad Vision 75"
+    std::string device_type;  // cloud SKU, e.g. "WoLock" / "WoLockPro"
   };
 
   // Authenticate against the SwitchBot account API. Captures the bearer
@@ -52,11 +53,11 @@ class CloudClient {
   bool list_devices(std::vector<AccountDevice> &out_devices,
                     std::string &error_out, bool force_refresh = false);
 
-  // Look up a specific keypad's communication key. `mac` may be in
-  // pretty (`B0:E9:FE:...`) or compact (`B0E9FE...`) form.
+  // Look up a device communication key. `mac` may be in pretty
+  // (`B0:E9:FE:...`) or compact (`B0E9FE...`) form.
   // `key_id_hex` receives the hex string (e.g. "88" or "C6"),
   // `key_bytes` receives the 16-byte AES key.
-  bool fetch_keypad_key(const std::string &mac, std::string &key_id_hex,
+  bool fetch_device_key(const std::string &mac, std::string &key_id_hex,
                         std::vector<uint8_t> &key_bytes,
                         std::string &error_out);
 

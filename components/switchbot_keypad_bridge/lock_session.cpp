@@ -18,21 +18,33 @@ const char *const TAG = "switchbot_keypad_bridge.session";
 // Encrypted protocol framing.
 constexpr uint8_t PROTOCOL_MAGIC = 0x57;
 
-// Session IV negotiation: first frame received after connect.
+// Session IV negotiation. Most keypads send this after connect; some reconnect
+// and continue with the IV they already have.
 // Shape: 57 00 00 00 0F 21 03 <key_id>
 constexpr size_t SESSION_IV_REQ_MIN = 8;
 
-constexpr size_t AES_IV_SIZE = 16;
 constexpr size_t IV_RESPONSE_HEADER = 4;  // iv_response_ prefix before the IV bytes
 
 }  // namespace
 
 void LockSession::reset() {
-  this->iv_established_ = false;
-  this->clear_replay_history_();
+  this->active_ = CryptoContext{};
+  this->pending_ = CryptoContext{};
+  this->reset_transport();
+}
+
+void LockSession::reset_transport() {
+  this->plaintext_size_ = 0;
+  this->header_ = FrameHeader{};
+  this->command_ = DecodedCommand{};
+  this->response_iv_valid_ = false;
 }
 
 LockSession::Action LockSession::process_frame(const std::string &frame) {
+  // Never expose stale decoded bytes or a stale response IV after a dropped
+  // frame. The bridge may relay plaintext asynchronously after COMMAND.
+  this->reset_transport();
+
   ESP_LOGV(TAG, "RX WIRE %zu bytes: %s", frame.size(),
            format_hex_pretty(reinterpret_cast<const uint8_t *>(frame.data()), frame.size()).c_str());
 
@@ -46,10 +58,9 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
       this->slot_id_ = requested_slot;
     }
     ESP_LOGD(TAG, "IV request");
-    this->rotate_iv_();
-    // A new IV invalidates any ciphertext sniffed under the previous one.
-    this->clear_replay_history_();
-    this->iv_established_ = true;
+    // Do not overwrite active_ yet. Vision-family keypads can send a delayed
+    // state poll from the previous generation after requesting the next IV.
+    this->rotate_pending_iv_();
     return Action::SEND_IV;
   }
 
@@ -67,22 +78,24 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
     return Action::NONE;
   }
 
-  // Refuse encrypted frames before the IV handshake completed in this session.
-  // A captured ciphertext from a previous connection would otherwise decrypt
-  // against the wrong (or stale) IV and ride on whatever lock state is set.
-  if (!this->iv_established_) {
-    ESP_LOGW(TAG, "Dropping encrypted frame: no IV negotiated in this session");
+  // Refuse encrypted frames before any IV has been negotiated for this key.
+  // BLE reconnects may preserve active_, but a fresh boot/reset must not
+  // decrypt against a zero or unrelated IV.
+  if (!this->active_.valid && !this->pending_.valid) {
+    ESP_LOGW(TAG, "Dropping encrypted frame: no IV negotiated");
     return Action::NONE;
   }
 
-  // The protocol echoes IV[0..1] back as the seq_a/seq_b header bytes.
-  // Reject anything that does not match the IV we just issued — this blocks
-  // cross-session replay of captured ciphertexts.
-  if (this->header_.seq_a != this->iv_response_[IV_RESPONSE_HEADER] ||
-      this->header_.seq_b != this->iv_response_[IV_RESPONSE_HEADER + 1]) {
+  // The protocol echoes IV[0..1] as seq_a/seq_b. Prefer pending_ when the
+  // keypad has switched; otherwise retain active_ just long enough to finish
+  // an in-flight poll. rotate_pending_iv_() guarantees their seq pairs differ.
+  const bool uses_pending = this->seq_matches_(this->pending_, this->header_);
+  const bool uses_active = this->seq_matches_(this->active_, this->header_);
+  if (!uses_pending && !uses_active) {
     ESP_LOGW(TAG, "Dropping frame: seq_a/seq_b mismatch (cross-session replay?)");
     return Action::NONE;
   }
+  CryptoContext &context = uses_pending ? this->pending_ : this->active_;
 
   const size_t ct_len = frame.size() - HEADER_LEN;
   if (ct_len > MAX_PAYLOAD) {
@@ -96,19 +109,31 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
   // fixed session IV, identical plaintexts produce identical ciphertexts.
   // We only flag duplicates that decode to a side-effecting command — state
   // polls are idempotent and a legitimate keypad emits them repeatedly.
-  const bool ciphertext_seen = this->is_replayed_ciphertext_(ciphertext, ct_len);
+  const bool ciphertext_seen =
+      this->is_replayed_ciphertext_(context, ciphertext, ct_len);
 
   uint8_t plaintext[MAX_PAYLOAD];
-  if (!this->xcrypt_(ciphertext, ct_len, plaintext)) {
+  if (!this->xcrypt_(context.iv, ciphertext, ct_len, plaintext)) {
     return Action::NONE;  // error already logged
   }
 
   ESP_LOGD(TAG, "RX %s", format_hex_pretty(plaintext, ct_len).c_str());
 
   this->command_ = decode_lock_command(plaintext, ct_len);
+
+  // Once a new IV has been advertised, the superseded generation is accepted
+  // only for an idempotent state poll that was already in flight. In
+  // particular, never let a delayed/captured lock or unlock cross the IV
+  // boundary even if its ciphertext was not present in the small replay ring.
+  if (!uses_pending && this->pending_.valid &&
+      this->command_.type != CommandType::STATE_POLL) {
+    ESP_LOGW(TAG, "Dropping non-poll frame under superseded IV");
+    this->command_ = DecodedCommand{};
+    return Action::NONE;
+  }
+
   if (this->command_.type == CommandType::UNKNOWN) {
     ESP_LOGI(TAG, "Unhandled command: %s", format_hex_pretty(plaintext, ct_len).c_str());
-    return Action::COMMAND;  // the bridge still ACKs unknown frames
   }
 
   // DOORBELL is deliberately left out of the replay filter: under a fixed
@@ -121,7 +146,20 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
       ESP_LOGW(TAG, "Dropping action: ciphertext replay within session");
       return Action::NONE;
     }
-    this->record_ciphertext_(ciphertext, ct_len);
+    this->record_ciphertext_(context, ciphertext, ct_len);
+  }
+
+  std::memcpy(this->plaintext_.data(), plaintext, ct_len);
+  this->plaintext_size_ = ct_len;
+  this->response_iv_ = context.iv;
+  this->response_iv_valid_ = true;
+
+  if (uses_pending) {
+    this->active_ = this->pending_;
+    this->pending_ = CryptoContext{};
+    ESP_LOGV(TAG, "Pending IV promoted");
+  } else if (this->pending_.valid) {
+    ESP_LOGD(TAG, "Accepted delayed state poll under previous IV");
   }
 
   return Action::COMMAND;
@@ -145,39 +183,59 @@ size_t LockSession::encrypt_response(const FrameHeader &header, const uint8_t *p
   out[1] = header.key_id;
   out[2] = header.seq_a;
   out[3] = header.seq_b;
-  if (!this->xcrypt_(plaintext, length, out + HEADER_LEN)) {
+  if (!this->response_iv_valid_ ||
+      header.seq_a != this->response_iv_[0] ||
+      header.seq_b != this->response_iv_[1]) {
+    ESP_LOGE(TAG, "Cannot encrypt response: no matching RX IV context");
+    return 0;
+  }
+  if (!this->xcrypt_(this->response_iv_, plaintext, length, out + HEADER_LEN)) {
     return 0;
   }
   return HEADER_LEN + length;
 }
 
-bool LockSession::xcrypt_(const uint8_t *input, size_t length, uint8_t *output) {
-  return aes_ctr_xcrypt(this->aes_key_,
-                        this->iv_response_.data() + IV_RESPONSE_HEADER,
-                        input, output, length);
+bool LockSession::xcrypt_(const std::array<uint8_t, AES_IV_SIZE> &iv,
+                          const uint8_t *input, size_t length, uint8_t *output) {
+  return aes_ctr_xcrypt(this->aes_key_, iv.data(), input, output, length);
 }
 
-void LockSession::rotate_iv_() {
-  for (size_t i = 0; i < AES_IV_SIZE; i += 4) {
-    const uint32_t value = esp_random();
-    std::memcpy(this->iv_response_.data() + IV_RESPONSE_HEADER + i, &value, 4);
+void LockSession::rotate_pending_iv_() {
+  this->pending_ = CryptoContext{};
+  auto fill_iv = [this]() {
+    for (size_t i = 0; i < AES_IV_SIZE; i += 4) {
+      const uint32_t value = esp_random();
+      std::memcpy(this->pending_.iv.data() + i, &value, 4);
+    }
+  };
+  fill_iv();
+
+  // seq_a/seq_b are the only generation selector carried on the wire. Avoid
+  // an ambiguous active/pending pair. Bound the retries so a broken RNG
+  // cannot stall the BLE task; the final bit flip still makes the pair unique.
+  size_t retries = 0;
+  while (this->active_.valid && this->pending_.iv[0] == this->active_.iv[0] &&
+         this->pending_.iv[1] == this->active_.iv[1] && retries++ < 4) {
+    fill_iv();
   }
-  ESP_LOGV(TAG, "IV rotated: %s",
-           format_hex_pretty(this->iv_response_.data() + IV_RESPONSE_HEADER, AES_IV_SIZE).c_str());
-}
-
-void LockSession::clear_replay_history_() {
-  this->replay_head_ = 0;
-  for (auto &entry : this->replay_history_) {
-    entry.length = 0;
+  if (this->active_.valid && this->pending_.iv[0] == this->active_.iv[0] &&
+      this->pending_.iv[1] == this->active_.iv[1]) {
+    this->pending_.iv[1] ^= 0x01;
   }
+  this->pending_.valid = true;
+  std::memcpy(this->iv_response_.data() + IV_RESPONSE_HEADER,
+              this->pending_.iv.data(), AES_IV_SIZE);
+  ESP_LOGV(TAG, "Pending IV: %s",
+           format_hex_pretty(this->pending_.iv.data(), AES_IV_SIZE).c_str());
 }
 
-bool LockSession::is_replayed_ciphertext_(const uint8_t *ciphertext, size_t length) const {
+bool LockSession::is_replayed_ciphertext_(const CryptoContext &context,
+                                          const uint8_t *ciphertext,
+                                          size_t length) const {
   if (length == 0 || length > MAX_PAYLOAD) {
     return false;
   }
-  for (const auto &entry : this->replay_history_) {
+  for (const auto &entry : context.replay_history) {
     if (entry.length == length && std::memcmp(entry.data.data(), ciphertext, length) == 0) {
       return true;
     }
@@ -185,14 +243,21 @@ bool LockSession::is_replayed_ciphertext_(const uint8_t *ciphertext, size_t leng
   return false;
 }
 
-void LockSession::record_ciphertext_(const uint8_t *ciphertext, size_t length) {
+void LockSession::record_ciphertext_(CryptoContext &context,
+                                     const uint8_t *ciphertext, size_t length) {
   if (length == 0 || length > MAX_PAYLOAD) {
     return;
   }
-  ReplayEntry &slot = this->replay_history_[this->replay_head_];
+  ReplayEntry &slot = context.replay_history[context.replay_head];
   std::memcpy(slot.data.data(), ciphertext, length);
   slot.length = length;
-  this->replay_head_ = (this->replay_head_ + 1) % REPLAY_HISTORY_SIZE;
+  context.replay_head = (context.replay_head + 1) % REPLAY_HISTORY_SIZE;
+}
+
+bool LockSession::seq_matches_(const CryptoContext &context,
+                               const FrameHeader &header) const {
+  return context.valid && header.seq_a == context.iv[0] &&
+         header.seq_b == context.iv[1];
 }
 
 }  // namespace switchbot_keypad_bridge

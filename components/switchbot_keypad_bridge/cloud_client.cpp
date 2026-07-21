@@ -6,6 +6,7 @@
 #include <cJSON.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_system.h>
 #include <esp_tls.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -181,6 +182,18 @@ bool CloudClient::post_json_(const std::string &url, const std::string &body,
                                  static_cast<int>(body.size()));
 
   esp_err_t err = esp_http_client_perform(client);
+  if (err != ESP_OK) {
+    // Transient connect failures ("sock < 0") happen when a TLS handshake
+    // lands on a bad moment — BLE/WiFi radio contention or a short heap dip.
+    // Log the heap for diagnosis and retry once before giving up.
+    ESP_LOGW(TAG, "HTTPS attempt failed (%s), free heap %u — retrying once",
+             esp_err_to_name(err),
+             static_cast<unsigned>(esp_get_free_heap_size()));
+    esp_http_client_close(client);
+    out.clear();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    err = esp_http_client_perform(client);
+  }
   bool ok = false;
   if (err != ESP_OK) {
     error_out = "HTTPS request failed: ";
@@ -294,7 +307,7 @@ bool CloudClient::list_devices(std::vector<AccountDevice> &out_devices,
   }
 
   // Return every account device that has a MAC. We don't classify here — the
-  // pairing UI decides which of these are keypads purely from each device's
+  // setup UI decides which of these are keypads purely from each device's
   // live BLE advertisement (see keypad_advert.h).
   std::vector<AccountDevice> picked;
   cJSON *item = nullptr;
@@ -302,12 +315,16 @@ bool CloudClient::list_devices(std::vector<AccountDevice> &out_devices,
     cJSON *mac = cJSON_GetObjectItemCaseSensitive(item, "device_mac");
     if (!cJSON_IsString(mac) || mac->valuestring == nullptr) continue;
     cJSON *name = cJSON_GetObjectItemCaseSensitive(item, "device_name");
+    cJSON *detail = cJSON_GetObjectItemCaseSensitive(item, "device_detail");
+    cJSON *type = detail != nullptr ? cJSON_GetObjectItemCaseSensitive(detail, "device_type")
+                                    : nullptr;
 
     AccountDevice dev;
     dev.mac          = compact_mac(mac->valuestring);
     dev.mac_pretty   = pretty_mac(dev.mac);
     dev.name         = (cJSON_IsString(name) && name->valuestring) ? name->valuestring
                                                                     : dev.mac_pretty;
+    dev.device_type  = (cJSON_IsString(type) && type->valuestring) ? type->valuestring : "";
     picked.push_back(std::move(dev));
   }
 
@@ -318,7 +335,7 @@ bool CloudClient::list_devices(std::vector<AccountDevice> &out_devices,
   return true;
 }
 
-bool CloudClient::fetch_keypad_key(const std::string &mac,
+bool CloudClient::fetch_device_key(const std::string &mac,
                                    std::string &key_id_hex,
                                    std::vector<uint8_t> &key_bytes,
                                    std::string &error_out) {

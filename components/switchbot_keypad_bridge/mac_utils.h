@@ -1,7 +1,7 @@
 #pragma once
 
 // MAC-address string/byte conversions shared by the cloud client, the
-// pairer, the pairing UI and the bridge. Pure string handling — no NimBLE
+// pairer, the setup UI and the bridge. Pure string handling — no NimBLE
 // or ESP-IDF dependency.
 
 #include <cstdint>

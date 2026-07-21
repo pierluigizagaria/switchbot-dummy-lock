@@ -1,0 +1,46 @@
+esphome:
+  name: switchbot-keypad-bridge-test
+
+esp32:
+  board: wt32-eth01
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: ../components
+    components: [switchbot_keypad_bridge]
+
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk:
+    pin: GPIO0
+    mode: CLK_EXT_IN
+  phy_addr: 1
+  power_pin: GPIO16
+
+logger:
+  level: VERBOSE
+
+api:
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: sntp
+
+switchbot_keypad_bridge:
+  keypad_action:
+    name: Action
+  keypad:
+    name: Keypad
+  linked_lock:
+    name: Lock
+  keypad_battery_level:
+    name: Keypad battery
+  lock_battery_level:
+    name: Lock battery
+  reset_button:
+    name: Reset

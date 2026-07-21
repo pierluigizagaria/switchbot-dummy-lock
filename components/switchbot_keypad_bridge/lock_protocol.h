@@ -26,7 +26,8 @@ enum class UnlockMethod : uint8_t {
 const char *unlock_method_name(UnlockMethod method);
 
 // The command a decrypted keypad frame represents. UNKNOWN means the bytes
-// matched no known frame — the caller should ACK and otherwise ignore it.
+// matched no known frame; the bridge may still relay the raw plaintext to a
+// linked physical lock.
 enum class CommandType : uint8_t {
   UNKNOWN,
   LOCK,

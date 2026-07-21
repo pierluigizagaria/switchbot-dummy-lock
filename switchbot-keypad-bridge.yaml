@@ -29,7 +29,7 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# TLS in the pairing wizard needs a valid system clock; SNTP keeps it set
+# TLS in the setup wizard needs a valid system clock; SNTP keeps it set
 # even before Home Assistant connects.
 time:
   - platform: sntp
@@ -41,13 +41,19 @@ switchbot_keypad_bridge:
   keypad:
     name: "Keypad"
 
-  # Keypad battery, read from its BLE advertisement once per scan interval.
-  battery_level:
-    name: "Keypad Battery"
+  linked_lock:
+    name: "Lock"
+
+  # Keypad and linked lock battery are read from BLE advertisements by the
+  # shared background scan below.
+  keypad_battery_level:
+    name: "Keypad battery"
+  lock_battery_level:
+    name: "Lock battery"
   # battery_scan_interval: 15min
 
-  unpair_button:
-    name: "Unpair"
+  reset_button:
+    name: "Reset"
 
   on_unlock:
     # method: "pin" | "fingerprint" | "nfc" | "face" | "unknown"   index: credential slot
