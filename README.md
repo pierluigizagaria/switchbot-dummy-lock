@@ -283,7 +283,14 @@ switchbot_keypad_bridge:
   models from the cloud device type, uses the lock communication key only as a
   transient setup key to provision the shared keypad/lock key, then verifies
   that shared slot. Each relayed command opens a short BLE connection and
-  disconnects again using the shared key.
+  disconnects again using the shared key. The disconnected NimBLE client keeps
+  its discovered GATT database, so subsequent actions skip service discovery
+  without keeping the lock awake between commands. When the keypad wakes, the
+  bridge opens that cached lock connection in parallel with authentication and
+  closes it on keypad disconnect or a 10-second safety timeout. This overlaps
+  the two BLE hops without an always-on connection. Runtime relay also uses a
+  short BLE connection interval and unacknowledged GATT writes (the same write
+  mode used by pySwitchbot); pairing retains acknowledged writes for safety.
 - **Key hygiene** — reset rotates the shared keypad/lock session key and clears
   the linked lock record, so a previously linked keypad can no longer command
   the bridge.

@@ -34,6 +34,14 @@ class PhysicalLockClient {
     PhysicalLockModel model{PhysicalLockModel::UNKNOWN};
     uint8_t key_id{0};
     std::array<uint8_t, 16> key{};
+    // Keep the disconnected NimBLE client and its discovered GATT database
+    // between relay calls. This avoids repeating service discovery without
+    // keeping the physical lock connected (and therefore awake) while idle.
+    bool reuse_gatt_cache{false};
+    // Runtime relay only: request a shorter connection interval and use GATT
+    // writes without response, matching pySwitchbot's command path. Pairing
+    // and key provisioning keep their conservative acknowledged writes.
+    bool low_latency_io{false};
   };
 
   // Coarse progress of one encrypted exchange, reported through the optional
@@ -73,6 +81,16 @@ class PhysicalLockClient {
                                const ProgressCallback &progress = nullptr,
                                const ResponseCallback &response_callback = nullptr);
 
+  // Open the BLE/GATT path without starting an encryption session. The bridge
+  // calls this only after a keypad wakes up, so lock connection latency can
+  // overlap keypad authentication without holding the lock awake while idle.
+  bool preconnect(const Config &config, std::string &error_out,
+                  const ProgressCallback &progress = nullptr);
+
+  // Close a connection left open by preconnect(). The disconnected client and
+  // discovered GATT database remain cached when reuse_gatt_cache is enabled.
+  void disconnect_preconnected();
+
   // Provision the keypad/lock shared key with the lock's cloud credential,
   // then verify the freshly-written shared slot on the same BLE connection.
   bool provision_and_verify_shared_key(
@@ -84,6 +102,11 @@ class PhysicalLockClient {
       const ProgressCallback &provision_progress = nullptr,
       const CommandProgressCallback &provision_command_progress = nullptr,
       const ProgressCallback &verify_progress = nullptr);
+
+  // Drop any retained disconnected client/GATT database. Call this when the
+  // linked lock changes or pairing is reset so stale handles are never reused
+  // for another device.
+  void clear_connection_cache();
 
  private:
   enum class CryptoMode : uint8_t { CTR, GCM };
@@ -99,6 +122,7 @@ class PhysicalLockClient {
                 NimBLERemoteCharacteristic *&tx,
                 std::string &error_out,
                 const ProgressCallback &progress);
+  void release_connection_(const Config &config, NimBLEClient *client);
   bool parse_session_response_(const std::string &wire, Session &session,
                                std::string &error_out);
   bool send_encrypted_(const Config &config, const Session &session,
@@ -114,6 +138,13 @@ class PhysicalLockClient {
   // through it fails (the next attempt re-scans).
   NimBLEAddress cached_addr_{};
   std::string   cached_mac_;
+
+  // A disconnected NimBLE client retains the peer's discovered services and
+  // characteristic handles. Reconnecting it with deleteAttributes=false is
+  // substantially faster than creating and discovering a fresh client, while
+  // drawing no connection-event power between commands.
+  NimBLEClient *cached_client_{nullptr};
+  std::string   cached_client_mac_;
 };
 
 }  // namespace switchbot_keypad_bridge

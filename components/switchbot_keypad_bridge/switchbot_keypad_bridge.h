@@ -155,6 +155,10 @@ class SwitchbotKeypadBridge : public Component {
   // one-shot background task. The keypad is never answered from this path;
   // relay completion is logged only.
   bool relay_to_lock_async_(const FrameHeader &header, const DecodedCommand &command);
+  // Starts a short central connection as soon as the keypad wakes, overlapping
+  // the lock's BLE setup with keypad authentication. It never runs while idle.
+  void start_lock_prewarm_async_();
+  void maybe_close_lock_prewarm_();
   PhysicalLockClient::Config physical_lock_config_(uint8_t slot_id) const;
 
   // ----- Transport helpers ---------------------------------------------------
@@ -268,6 +272,11 @@ class SwitchbotKeypadBridge : public Component {
   // True while the relay task owns physical_lock_client_ and the central
   // role; battery scans defer to it.
   std::atomic<bool> lock_relay_busy_{false};
+  // Prewarm has separate ownership. Relay waits for it to finish, then reuses
+  // the connection; main-loop cleanup only runs when both flags are clear.
+  std::atomic<bool> lock_prewarm_busy_{false};
+  bool lock_prewarm_close_pending_{false};
+  uint32_t lock_prewarm_close_at_{0};
   // Relay outcome, written by the relay task and consumed by loop() for
   // logging only. Fields are stable while the flag is false→true (single
   // relay in flight, release/acquire pairing).

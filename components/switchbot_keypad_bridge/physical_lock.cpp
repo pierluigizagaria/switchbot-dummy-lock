@@ -8,6 +8,7 @@
 #include <freertos/semphr.h>
 
 #include "esphome/core/helpers.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "aes_ctr.h"
 #include "ble_utils.h"
@@ -22,6 +23,15 @@ const char *const TAG = "switchbot_keypad_bridge.lock";
 
 constexpr uint8_t PROTOCOL_MAGIC = 0x57;
 constexpr size_t WIRE_HEADER_LEN = 4;
+
+// BLE units: interval is 1.25 ms and supervision timeout is 10 ms. These
+// values keep the short relay session responsive without changing idle power
+// (the link is still disconnected immediately after each command).
+constexpr uint16_t LOW_LATENCY_INTERVAL_MIN = 12;  // 15 ms
+constexpr uint16_t LOW_LATENCY_INTERVAL_MAX = 24;  // 30 ms
+constexpr uint16_t LOW_LATENCY_SUPERVISION_TIMEOUT = 400;  // 4 s
+constexpr uint16_t CONNECT_SCAN_INTERVAL = 16;  // 10 ms
+constexpr uint16_t CONNECT_SCAN_WINDOW = 16;    // continuous while connecting
 
 struct NotifyWaiter {
   SemaphoreHandle_t sem{nullptr};
@@ -259,8 +269,7 @@ bool PhysicalLockClient::send_plaintext_sequence(
   NotifyWaiter waiter;
   waiter.sem = xSemaphoreCreateBinary();
   if (waiter.sem == nullptr) {
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
+    this->release_connection_(config, client);
     error_out = "Could not allocate lock notification semaphore.";
     return false;
   }
@@ -270,10 +279,12 @@ bool PhysicalLockClient::send_plaintext_sequence(
                                size_t length, bool /*is_notify*/) {
                        waiter.value.assign(reinterpret_cast<const char *>(data), length);
                        xSemaphoreGive(waiter.sem);
-                     })) {
+                     }, /*response=*/!config.low_latency_io)) {
     vSemaphoreDelete(waiter.sem);
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
+    this->release_connection_(config, client);
+    if (config.reuse_gatt_cache && client == this->cached_client_) {
+      this->clear_connection_cache();
+    }
     error_out = "Could not subscribe to lock notifications.";
     return false;
   }
@@ -283,7 +294,8 @@ bool PhysicalLockClient::send_plaintext_sequence(
   std::string notify;
   if (progress) progress(Phase::SESSION);
   uint8_t iv_req[8] = {PROTOCOL_MAGIC, 0x00, 0x00, 0x00, 0x0F, 0x21, 0x03, config.key_id};
-  if (!rx->writeValue(iv_req, sizeof(iv_req), /*response=*/true)) {
+  if (!rx->writeValue(iv_req, sizeof(iv_req),
+                      /*response=*/!config.low_latency_io)) {
     error_out = "Could not request a lock encryption session.";
   } else if (!wait_notify(waiter, 3000, notify)) {
     error_out = "Lock did not open an encryption session.";
@@ -313,11 +325,36 @@ bool PhysicalLockClient::send_plaintext_sequence(
     }
   }
 
-  tx->unsubscribe();
+  tx->unsubscribe(/*response=*/false);
   vSemaphoreDelete(waiter.sem);
-  client->disconnect();
-  NimBLEDevice::deleteClient(client);
+  this->release_connection_(config, client);
   return ok;
+}
+
+bool PhysicalLockClient::preconnect(const Config &config, std::string &error_out,
+                                    const ProgressCallback &progress) {
+  if (!config.reuse_gatt_cache) {
+    error_out = "Lock preconnect requires the reconnect cache.";
+    return false;
+  }
+  NimBLEClient *client = nullptr;
+  NimBLERemoteCharacteristic *rx = nullptr;
+  NimBLERemoteCharacteristic *tx = nullptr;
+  if (!this->connect_(config, client, rx, tx, error_out, progress)) {
+    return false;
+  }
+  if (client != this->cached_client_ || rx == nullptr || tx == nullptr) {
+    this->release_connection_(config, client);
+    error_out = "Lock preconnect did not retain a reusable GATT client.";
+    return false;
+  }
+  return true;
+}
+
+void PhysicalLockClient::disconnect_preconnected() {
+  if (this->cached_client_ != nullptr && this->cached_client_->isConnected()) {
+    this->cached_client_->disconnect();
+  }
 }
 
 bool PhysicalLockClient::provision_and_verify_shared_key(
@@ -462,6 +499,34 @@ bool PhysicalLockClient::connect_(const Config &config, NimBLEClient *&client,
                                   NimBLERemoteCharacteristic *&tx,
                                   std::string &error_out,
                                   const ProgressCallback &progress) {
+  const uint32_t connect_started_at = millis();
+
+  // A short preconnect may already have opened the link while the keypad was
+  // authenticating. Reuse it directly; no reconnect, discovery or idle wait.
+  const bool warm =
+      config.reuse_gatt_cache && this->cached_client_ != nullptr &&
+      this->cached_client_mac_ == upper_mac(config.mac) &&
+      this->cached_client_->isConnected();
+  if (warm) {
+    NimBLERemoteService *svc = this->cached_client_->getService(
+        NimBLEUUID(SWITCHBOT_SERVICE_UUID));
+    NimBLERemoteCharacteristic *warm_rx = nullptr;
+    NimBLERemoteCharacteristic *warm_tx = nullptr;
+    if (svc != nullptr) {
+      warm_rx = svc->getCharacteristic(NimBLEUUID(SWITCHBOT_RX_CHAR_UUID));
+      warm_tx = svc->getCharacteristic(NimBLEUUID(SWITCHBOT_TX_CHAR_UUID));
+    }
+    if (warm_rx != nullptr && warm_tx != nullptr) {
+      client = this->cached_client_;
+      rx = warm_rx;
+      tx = warm_tx;
+      ESP_LOGD(TAG, "Lock BLE ready in %u ms (preconnected)",
+               static_cast<unsigned>(millis() - connect_started_at));
+      return true;
+    }
+    this->clear_connection_cache();
+  }
+
   // Two attempts at most: the first connects straight to the last cached
   // advertisement address — or, fresh after boot, to the address rebuilt
   // from the stored MAC — skipping the ~2.5 s discovery scan entirely. Only
@@ -482,6 +547,57 @@ bool PhysicalLockClient::connect_(const Config &config, NimBLEClient *&client,
     }
 
     if (progress) progress(Phase::CONNECT);
+
+    // Reuse the same disconnected client for relay traffic. NimBLE keeps the
+    // remote attribute database on the client, and deleteAttributes=false
+    // skips GATT discovery on a known peer. The actual BLE link is still
+    // closed after every command, so the lock does not stay awake while idle.
+    const bool reusable =
+        config.reuse_gatt_cache && this->cached_client_ != nullptr &&
+        this->cached_client_mac_ == upper_mac(config.mac) &&
+        !this->cached_client_->isConnected();
+    if (reusable) {
+      this->cached_client_->setConnectTimeout(5000);
+      if (config.low_latency_io) {
+        this->cached_client_->setConnectionParams(
+            LOW_LATENCY_INTERVAL_MIN, LOW_LATENCY_INTERVAL_MAX, 0,
+            LOW_LATENCY_SUPERVISION_TIMEOUT, CONNECT_SCAN_INTERVAL,
+            CONNECT_SCAN_WINDOW);
+      }
+      if (this->cached_client_->connect(target, /*deleteAttributes=*/false,
+                                        /*asyncConnect=*/false,
+                                        /*exchangeMTU=*/false)) {
+        NimBLERemoteService *svc = this->cached_client_->getService(
+            NimBLEUUID(SWITCHBOT_SERVICE_UUID));
+        NimBLERemoteCharacteristic *cached_rx = nullptr;
+        NimBLERemoteCharacteristic *cached_tx = nullptr;
+        if (svc != nullptr) {
+          cached_rx = svc->getCharacteristic(NimBLEUUID(SWITCHBOT_RX_CHAR_UUID));
+          cached_tx = svc->getCharacteristic(NimBLEUUID(SWITCHBOT_TX_CHAR_UUID));
+        }
+        if (cached_rx != nullptr && cached_tx != nullptr) {
+          client = this->cached_client_;
+          rx = cached_rx;
+          tx = cached_tx;
+          this->cached_addr_ = target;
+          this->cached_mac_ = config.mac;
+          ESP_LOGD(TAG, "Lock BLE ready in %u ms (cached GATT)",
+                   static_cast<unsigned>(millis() - connect_started_at));
+          return true;
+        }
+        this->cached_client_->disconnect();
+      }
+
+      // The peer may have changed firmware or invalidated its handles. Drop
+      // the stale client once and let the normal discovery fallback rebuild
+      // a clean cache below.
+      this->clear_connection_cache();
+      if (attempt == 0) {
+        this->cached_mac_.clear();
+        continue;
+      }
+    }
+
     SwitchbotGattConnection conn;
     if (!connect_switchbot_service(target, 5000, "physical lock", conn, error_out)) {
       if (attempt == 0) {
@@ -495,12 +611,51 @@ bool PhysicalLockClient::connect_(const Config &config, NimBLEClient *&client,
     client = conn.client;
     rx = conn.rx;
     tx = conn.tx;
+    if (config.low_latency_io) {
+      // Fresh clients connect with NimBLE's conservative defaults. Apply the
+      // faster interval for the encryption/command exchange; cached reconnects
+      // use the same values from their first connection request.
+      client->updateConnParams(LOW_LATENCY_INTERVAL_MIN,
+                               LOW_LATENCY_INTERVAL_MAX, 0,
+                               LOW_LATENCY_SUPERVISION_TIMEOUT);
+    }
     this->cached_addr_ = target;
     this->cached_mac_  = config.mac;
+    if (config.reuse_gatt_cache) {
+      this->cached_client_ = client;
+      this->cached_client_mac_ = upper_mac(config.mac);
+      ESP_LOGD(TAG, "Lock BLE ready in %u ms (fresh GATT; cached for reconnect)",
+               static_cast<unsigned>(millis() - connect_started_at));
+    }
     return true;
   }
   error_out = "Could not connect to the physical lock.";
   return false;
+}
+
+void PhysicalLockClient::release_connection_(const Config &config,
+                                             NimBLEClient *client) {
+  if (client == nullptr) return;
+  if (client->isConnected()) {
+    client->disconnect();
+  }
+  if (config.reuse_gatt_cache && client == this->cached_client_) {
+    return;
+  }
+  NimBLEDevice::deleteClient(client);
+}
+
+void PhysicalLockClient::clear_connection_cache() {
+  if (this->cached_client_ != nullptr) {
+    if (this->cached_client_->isConnected()) {
+      this->cached_client_->disconnect();
+    }
+    NimBLEDevice::deleteClient(this->cached_client_);
+    this->cached_client_ = nullptr;
+  }
+  this->cached_client_mac_.clear();
+  this->cached_addr_ = NimBLEAddress{};
+  this->cached_mac_.clear();
 }
 
 bool PhysicalLockClient::parse_session_response_(const std::string &wire,
@@ -564,7 +719,8 @@ bool PhysicalLockClient::send_encrypted_(const Config &config, const Session &se
 
   ESP_LOGV(TAG, "TX lock %s",
            format_hex_pretty(frame.data(), frame.size()).c_str());
-  if (!rx->writeValue(frame.data(), frame.size(), /*response=*/true)) {
+  if (!rx->writeValue(frame.data(), frame.size(),
+                      /*response=*/!config.low_latency_io)) {
     error_out = "Could not write encrypted command to the lock.";
     return false;
   }

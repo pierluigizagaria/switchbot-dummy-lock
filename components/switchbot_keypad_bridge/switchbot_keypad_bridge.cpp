@@ -262,14 +262,20 @@ void SwitchbotKeypadBridge::loop() {
     if (ev.type == QueuedEvent::CONNECT) {
       ESP_LOGI(TAG, "Keypad connected");
       this->session_.reset_transport();
+      this->lock_prewarm_close_pending_ = false;
+      this->lock_prewarm_close_at_ = millis() + 10000;
+      this->start_lock_prewarm_async_();
     } else if (ev.type == QueuedEvent::DISCONNECT) {
       ESP_LOGI(TAG, "Keypad disconnected, restarting advertising");
       this->session_.reset_transport();
+      this->lock_prewarm_close_pending_ = true;
       NimBLEDevice::startAdvertising();
     } else if (ev.type == QueuedEvent::RX) {
       this->on_rx_frame_(ev.frame);
     }
   }
+
+  this->maybe_close_lock_prewarm_();
 
   if (this->keypad_battery_level_sensor_ != nullptr ||
       this->lock_battery_level_sensor_ != nullptr) {
@@ -315,6 +321,14 @@ void SwitchbotKeypadBridge::apply_pending_pairing_() {
 
 void SwitchbotKeypadBridge::apply_pending_lock_link_() {
   if (this->pending_lock_apply_.exchange(false, std::memory_order_acquire)) {
+    if (this->lock_relay_busy_.load(std::memory_order_acquire) ||
+        this->lock_prewarm_busy_.load(std::memory_order_acquire)) {
+      this->pending_lock_apply_.store(true, std::memory_order_release);
+      return;
+    }
+    // The peer and its GATT handles may be changing. Never carry the previous
+    // lock's reconnect cache across a new link operation.
+    this->physical_lock_client_.clear_connection_cache();
     LinkedLockInfo info{};
     if (parse_mac_pretty(this->pending_lock_mac_, info.mac)) {
       info.valid = 1;
@@ -634,6 +648,8 @@ PhysicalLockClient::Config SwitchbotKeypadBridge::physical_lock_config_(uint8_t 
     cfg.model = static_cast<PhysicalLockModel>(this->linked_lock_info_.model);
     cfg.key_id = slot_id;
     cfg.key = this->shared_key_;
+    cfg.reuse_gatt_cache = true;
+    cfg.low_latency_io = true;
   }
   return cfg;
 }
@@ -669,6 +685,14 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
   BaseType_t rc = xTaskCreatePinnedToCore(
       [](void *raw) {
         auto *c = static_cast<RelayCtx *>(raw);
+        // A keypad-connect task may still be opening the same physical link.
+        // Wait for that one owner, then consume its already-open connection.
+        const TickType_t wait_started = xTaskGetTickCount();
+        const TickType_t wait_limit = pdMS_TO_TICKS(14000);
+        while (c->self->lock_prewarm_busy_.load(std::memory_order_acquire) &&
+               (xTaskGetTickCount() - wait_started) < wait_limit) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
         std::vector<uint8_t> response;
         std::string error;
         bool result_posted = false;
@@ -678,15 +702,20 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
           c->self->pending_relay_apply_.store(true, std::memory_order_release);
           result_posted = true;
         };
-        const bool ok = c->self->physical_lock_client_.send_plaintext(
-            c->cfg, c->plaintext.data(), c->plaintext.size(), response, error,
-            nullptr,
-            [&post_relay_result](const std::vector<uint8_t> &reply) {
-              // The keypad already got its local response. This callback only
-              // lets loop() log that the physical lock replied.
-              (void) reply;
-              post_relay_result(true);
-            });
+        bool ok = false;
+        if (c->self->lock_prewarm_busy_.load(std::memory_order_acquire)) {
+          error = "Timed out waiting for the lock preconnect task.";
+        } else {
+          ok = c->self->physical_lock_client_.send_plaintext(
+              c->cfg, c->plaintext.data(), c->plaintext.size(), response, error,
+              nullptr,
+              [&post_relay_result](const std::vector<uint8_t> &reply) {
+                // The keypad already got its local response. This callback only
+                // lets loop() log that the physical lock replied.
+                (void) reply;
+                post_relay_result(true);
+              });
+        }
         if (!ok) {
           ESP_LOGW(TAG, "Lock relay command failed: %s", error.c_str());
         }
@@ -710,6 +739,60 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
     return false;
   }
   return true;
+}
+
+void SwitchbotKeypadBridge::start_lock_prewarm_async_() {
+  if (!this->lock_linked_ || this->linked_lock_info_.valid == 0 ||
+      this->lock_relay_busy_.load(std::memory_order_acquire) ||
+      this->lock_prewarm_busy_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  this->stop_battery_scan_();
+  struct PrewarmCtx {
+    SwitchbotKeypadBridge *self;
+    PhysicalLockClient::Config cfg;
+  };
+  auto *ctx = new PrewarmCtx{
+      this, this->physical_lock_config_(this->linked_lock_info_.slot_id)};
+  BaseType_t rc = xTaskCreatePinnedToCore(
+      [](void *raw) {
+        auto *c = static_cast<PrewarmCtx *>(raw);
+        std::string error;
+        const uint32_t started_at = millis();
+        if (c->self->physical_lock_client_.preconnect(c->cfg, error)) {
+          ESP_LOGD(TAG, "Lock preconnected after keypad wake in %u ms",
+                   static_cast<unsigned>(millis() - started_at));
+        } else {
+          // Relay still gets its normal connect+fallback attempt; prewarm is
+          // opportunistic and must never turn a recoverable miss into failure.
+          ESP_LOGD(TAG, "Lock preconnect skipped: %s", error.c_str());
+        }
+        c->self->lock_prewarm_busy_.store(false, std::memory_order_release);
+        delete c;
+        vTaskDelete(nullptr);
+      },
+      "lock-prewarm", 6144, ctx, tskIDLE_PRIORITY + 2, nullptr, 0);
+  if (rc != pdPASS) {
+    delete ctx;
+    this->lock_prewarm_busy_.store(false, std::memory_order_release);
+    ESP_LOGD(TAG, "Could not start lock preconnect task");
+  }
+}
+
+void SwitchbotKeypadBridge::maybe_close_lock_prewarm_() {
+  const bool expired = this->lock_prewarm_close_at_ != 0 &&
+      static_cast<int32_t>(millis() - this->lock_prewarm_close_at_) >= 0;
+  if (!this->lock_prewarm_close_pending_ && !expired) {
+    return;
+  }
+  if (this->lock_relay_busy_.load(std::memory_order_acquire) ||
+      this->lock_prewarm_busy_.load(std::memory_order_acquire)) {
+    return;
+  }
+  this->physical_lock_client_.disconnect_preconnected();
+  this->lock_prewarm_close_pending_ = false;
+  this->lock_prewarm_close_at_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1107,7 @@ void SwitchbotKeypadBridge::stop_battery_scan_() {
 bool SwitchbotKeypadBridge::background_ble_busy_() const {
   return this->pairing_ui_.is_running() ||
          this->lock_relay_busy_.load(std::memory_order_relaxed) ||
+         this->lock_prewarm_busy_.load(std::memory_order_relaxed) ||
          (this->server_ != nullptr && this->server_->getConnectedCount() > 0);
 }
 
