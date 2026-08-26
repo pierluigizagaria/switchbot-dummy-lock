@@ -49,9 +49,9 @@ class LockSession {
   // session and must keep the IV alive.
   void reset();
 
-  // Clear transient decoded-frame state while preserving the negotiated IV and
-  // replay window. Called on BLE connect/disconnect events because some
-  // keypads continue the same logical session after a transport reconnect.
+  // Clear transient decoded-frame state while preserving active/pending IVs
+  // and their replay windows. A transport boundary does revoke the one-shot
+  // Fast Unlock overlap, which is valid only within one BLE connection.
   void reset_transport();
 
   // Forget the learned token slot as well (pairing reset only).
@@ -84,7 +84,8 @@ class LockSession {
   static constexpr size_t REPLAY_HISTORY_SIZE = 8;
 
   bool is_iv_request_(const std::string &frame) const;
-  void rotate_pending_iv_();
+  void ensure_pending_iv_();
+  void clear_transient_();
 
   // AES-CTR is symmetric, so a single primitive covers both directions.
   bool xcrypt_(const std::array<uint8_t, AES_IV_SIZE> &iv, const uint8_t *input,
@@ -112,6 +113,8 @@ class LockSession {
     std::array<uint8_t, AES_IV_SIZE> iv{};
     std::array<ReplayEntry, REPLAY_HISTORY_SIZE> replay_history{};
     size_t replay_head{0};
+    bool late_action_allowed{false};
+    bool handoff_poll_seen{false};
     bool valid{false};
   };
 
@@ -123,6 +126,11 @@ class LockSession {
 
   CryptoContext active_{};
   CryptoContext pending_{};
+  // Immediate predecessor retained only when pending_ was committed by a
+  // state poll. The next valid encrypted frame, a fresh IV request, transport
+  // boundary, slot change or reset discards it. pending_ and retired_ never
+  // coexist.
+  CryptoContext retired_{};
 
   std::array<uint8_t, 20> iv_response_{0x01, 0x00, 0x00, 0x00};
 
