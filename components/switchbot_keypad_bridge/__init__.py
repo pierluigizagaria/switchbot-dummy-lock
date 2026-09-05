@@ -55,6 +55,7 @@ CONF_KEYPAD_BATTERY_LEVEL = "keypad_battery_level"
 CONF_LOCK_BATTERY_LEVEL = "lock_battery_level"
 CONF_BATTERY_SCAN_INTERVAL = "battery_scan_interval"
 CONF_RESET_BUTTON = "reset_button"
+CONF_REARM_BUTTON = "rearm_button"
 CONF_ON_LOCK = "on_lock"
 CONF_ON_UNLOCK = "on_unlock"
 CONF_ON_DOORBELL = "on_doorbell"
@@ -73,6 +74,7 @@ SwitchbotKeypadBridge = switchbot_keypad_bridge_ns.class_(
     "SwitchbotKeypadBridge", cg.Component
 )
 ResetButton = switchbot_keypad_bridge_ns.class_("ResetButton", button.Button)
+RearmButton = switchbot_keypad_bridge_ns.class_("RearmButton", button.Button)
 LockTrigger = switchbot_keypad_bridge_ns.class_(
     "LockTrigger", automation.Trigger.template()
 )
@@ -137,6 +139,18 @@ CONFIG_SCHEMA = cv.Schema(
             ResetButton,
             entity_category=ENTITY_CATEGORY_CONFIG,
             icon="mdi:restart",
+        ),
+        # Works around Keypad Vision only re-arming its face/hand auto-scan
+        # after it receives its OWN physical Lock command — pressing this
+        # reports LOCKED on the keypad's next poll without needing that
+        # button press. Wire it into an automation that fires whenever the
+        # door/lock closes through whatever means you actually use (a
+        # separate smart lock, a door sensor, ...). See
+        # https://github.com/pierluigizagaria/switchbot-keypad-bridge/issues/14
+        cv.Optional(CONF_REARM_BUTTON): button.button_schema(
+            RearmButton,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            icon="mdi:lock-check",
         ),
         cv.GenerateID(CONF_PAIRING_UI_HTML_ID): cv.declare_id(cg.uint8),
         cv.Optional(CONF_ON_LOCK): automation.validate_automation(
@@ -231,6 +245,10 @@ async def to_code(config):
         )
 
     if button_conf := config.get(CONF_RESET_BUTTON):
+        btn = await button.new_button(button_conf)
+        await cg.register_parented(btn, config[CONF_ID])
+
+    if button_conf := config.get(CONF_REARM_BUTTON):
         btn = await button.new_button(button_conf)
         await cg.register_parented(btn, config[CONF_ID])
 

@@ -418,6 +418,11 @@ void ResetButton::press_action() {
   this->parent_->reset_pairing();
 }
 
+void RearmButton::press_action() {
+  ESP_LOGI(TAG, "Reporting LOCKED to keypad (rearm)");
+  this->parent_->set_lock_state(true);
+}
+
 void SwitchbotKeypadBridge::dump_config() {
   ESP_LOGCONFIG(TAG, "SwitchBot Keypad Bridge:");
   ESP_LOGCONFIG(TAG, "  BLE address: %s", NimBLEDevice::getAddress().toString().c_str());
