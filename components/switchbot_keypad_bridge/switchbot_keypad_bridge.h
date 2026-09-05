@@ -82,6 +82,16 @@ class SwitchbotKeypadBridge : public Component {
   // re-opens the setup wizard — no reboot. Invoked by ResetButton.
   void reset_pairing();
 
+  // Reports LOCKED (true) or UNLOCKED (false) to the keypad on its next
+  // STATE_POLL. Keypad Vision only re-arms its face/hand auto-scan once it
+  // observes LOCKED again, which otherwise only happens after its own
+  // physical Lock command — this lets Home Assistant report it directly
+  // when the door/lock closes through some other means. Invoked by
+  // RearmButton; safe to call from the main task at any time.
+  void set_lock_state(bool locked) {
+    this->lock_state_ = locked ? LockState::LOCKED : LockState::UNLOCKED;
+  }
+
   void add_on_lock_callback(std::function<void()> &&callback) {
     this->on_lock_callbacks_.add(std::move(callback));
   }
@@ -312,6 +322,15 @@ class SwitchbotKeypadBridge : public Component {
 // Home Assistant reset button: forgets keypad and lock, rotates the shared key
 // and re-opens the setup wizard — all without a reboot.
 class ResetButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
+ protected:
+  void press_action() override;
+};
+
+// Home Assistant button that reports LOCKED to the keypad, re-arming Keypad
+// Vision's face/hand auto-scan without needing its own physical Lock button.
+// Wire into an automation that fires when the door/lock closes through
+// whatever means you actually use.
+class RearmButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
  protected:
   void press_action() override;
 };
